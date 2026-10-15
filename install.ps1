@@ -37,11 +37,7 @@ function Initialize-WindowsEnvironment([string]$TemporaryRoot) {
         Stop-Install 'Windows 10 22H2 이상 또는 Windows 11 x64 컴퓨터가 필요합니다.'
     }
     $build = 0
-    try {
-        $buildText = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuildNumber -ErrorAction Stop).CurrentBuildNumber
-    } catch {
-        Stop-Install 'Windows 버전을 확인하지 못했습니다. Windows 업데이트 후 다시 시도해주세요.'
-    }
+    $buildText = [string][Environment]::OSVersion.Version.Build
     if (-not [int]::TryParse([string]$buildText, [ref]$build) -or $build -lt 19045) {
         Stop-Install 'Windows 10 22H2 이상 또는 Windows 11 x64 컴퓨터가 필요합니다.'
     }
@@ -370,10 +366,10 @@ try {
       appVersion = 'bootstrap-windows-v1'
     } | ConvertTo-Json -Compress)
   } catch {
-    Stop-Install '구매 권한을 확인하지 못했습니다. 새 명령어를 발급해 다시 시도해주세요.'
+    Stop-Install '설치 서버에 연결하지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.'
   }
 
-  if ($reply.platform -ne 'windows') { Stop-Install 'Windows용 배포 주소를 받지 못했습니다. 구매 자료에서 새 명령어를 받아주세요.' }
+  if ($reply.platform -ne 'windows') { Stop-Install 'Windows용 배포 주소를 받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
   if (-not $reply.archiveUrl -or $reply.archiveUrl -notmatch '^https://') { Stop-Install '안전한 OT.OS 배포 주소를 받지 못했습니다.' }
   $archive = Join-Path $tempRoot 'ot-os.tar.gz'
   $source = Join-Path $tempRoot 'source'
@@ -388,7 +384,7 @@ try {
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Stop-Install '배포본에 product/manifest.json이 없습니다.' }
   $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
   if ($manifest.productId -ne 'otos' -or -not $manifest.version -or $manifest.platform -ne 'windows') {
-    Stop-Install 'Windows용 OT.OS 배포본을 확인할 수 없습니다. 새 설치명령어를 받아 다시 시도해주세요.'
+    Stop-Install 'Windows용 OT.OS 배포본을 확인할 수 없습니다. 같은 설치 명령으로 다시 시도해주세요.'
   }
 
   Test-OtosNativeFiles (Join-Path $product 'plugins\otos-studio') (Join-Path $product 'otos-studio-client-sha256.txt') | Out-Null
@@ -457,7 +453,7 @@ try {
   Write-Host '이제 Codex에서 OT.OS로 원하는 작업과 상품 URL을 보내세요.'
 } catch {
   $originalError = $_
-  $detail = '네트워크 접근 허용 여부를 확인한 뒤 구매 자료에서 새 설치명령어를 받아 다시 시도해주세요.'
+  $detail = '네트워크 접근을 확인한 뒤 같은 설치 명령으로 다시 시도해주세요.'
   $cause = [string]$originalError.Exception.Message
   if ($Token) { $cause = $cause.Replace($Token, '[토큰 가림]') }
   if ($installStep -eq '설치 환경 확인') {
