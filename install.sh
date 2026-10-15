@@ -1,7 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 install_step="설치 준비"
-trap 'printf "설치 미완료 — %s 단계에서 멈췄습니다. 구매 자료에서 새 설치명령어를 받아 다시 시도해주세요.\n" "$install_step" >&2' ERR
+trap 'printf "설치 미완료 — %s 단계에서 멈췄습니다. 같은 설치 명령으로 다시 시도해주세요.\n" "$install_step" >&2' ERR
 
 say() {
   printf '%s\n' "$1"
@@ -309,7 +309,7 @@ http_status="$(curl -sS --proto '=https' --tlsv1.2 \
 
 if [ "$http_status" != "200" ]; then
   error_code="$(plutil -extract code raw -o - "$response_file" 2>/dev/null || true)"
-  fail "구매 권한을 확인하지 못했습니다 (${error_code:-HTTP $http_status}). 새 명령어를 발급해 다시 시도해주세요."
+  fail "구매 권한을 확인하지 못했습니다 (${error_code:-HTTP $http_status}). 같은 설치 명령으로 다시 시도해주세요."
 fi
 
 archive_url="$(plutil -extract archiveUrl raw -o - "$response_file" 2>/dev/null || true)"
@@ -324,7 +324,7 @@ install_step="설치 파일을 내려받고 확인하고 있습니다."
 say "[3/4] 설치 파일을 내려받고 확인하고 있습니다."
 curl -fsSL --proto '=https' --tlsv1.2 "$archive_url" -o "$archive_file" 2> "$temp_root/download.stderr" || fail "설치 파일을 내려받지 못했습니다. 네트워크 접근을 허용한 뒤 다시 시도해주세요."
 mkdir -p "$source_dir"
-tar -xzf "$archive_file" -C "$source_dir" --strip-components=1 2> "$temp_root/extract.stderr" || fail "설치 파일을 풀지 못했습니다. 새 설치명령어로 다시 시도해주세요."
+tar -xzf "$archive_file" -C "$source_dir" --strip-components=1 2> "$temp_root/extract.stderr" || fail "설치 파일을 풀지 못했습니다. 같은 설치 명령으로 다시 시도해주세요."
 
 manifest="$source_dir/product/manifest.json"
 [ -f "$manifest" ] || fail "배포본에 product/manifest.json이 없습니다. 설치를 중단합니다."
