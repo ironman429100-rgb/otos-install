@@ -15,7 +15,21 @@ fail() {
 
 otos_native_fail() { printf 'OT.OS 플러그인 설치 실패: %s\n' "$1" >&2; return 1; }
 
-otos_native_json() { /usr/bin/plutil -extract "$2" raw -o - "$1" 2>/dev/null; }
+otos_native_json() {
+  local extracted
+  if extracted="$(trap - ERR; /usr/bin/plutil -extract "$2" raw -o - "$1" 2>/dev/null)"; then
+    printf '%s' "$extracted"
+  else
+    return 1
+  fi
+}
+
+otos_native_has_json_index() {
+  if /usr/bin/plutil -extract "$1" json -o /dev/null "$2" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
 
 otos_native_require_array() {
   /usr/bin/plutil -convert xml1 -o "$otos_native_temp/json-check.plist" "$1" >/dev/null 2>&1 &&
@@ -63,7 +77,7 @@ otos_native_preflight() {
   otos_native_require_array "$otos_native_temp/marketplaces.json" marketplaces || return 1
   otos_market_index=0
   otos_installed_count=0
-  while /usr/bin/plutil -extract "marketplaces.$otos_market_index" json -o /dev/null "$otos_native_temp/marketplaces.json" 2>/dev/null; do
+  while otos_native_has_json_index "marketplaces.$otos_market_index" "$otos_native_temp/marketplaces.json"; do
     otos_market_name="$(otos_native_json "$otos_native_temp/marketplaces.json" "marketplaces.$otos_market_index.name" || true)"
     [ -n "$otos_market_name" ] || { otos_native_fail 'marketplace 식별자가 없어 구매 토큰을 사용하지 않았습니다.'; return 1; }
     otos_list_file="$otos_native_temp/plugins-$otos_market_index.json"
@@ -72,7 +86,7 @@ otos_native_preflight() {
     }
     otos_native_require_array "$otos_list_file" installed || return 1
     otos_plugin_index=0
-    while /usr/bin/plutil -extract "installed.$otos_plugin_index" json -o /dev/null "$otos_list_file" 2>/dev/null; do
+    while otos_native_has_json_index "installed.$otos_plugin_index" "$otos_list_file"; do
       otos_plugin_name="$(otos_native_json "$otos_list_file" "installed.$otos_plugin_index.name" || true)"
       otos_plugin_id="$(otos_native_json "$otos_list_file" "installed.$otos_plugin_index.pluginId" || true)"
       [ -n "$otos_plugin_name" ] && [ -n "$otos_plugin_id" ] || { otos_native_fail '기존 플러그인 식별자가 없어 구매 토큰을 사용하지 않았습니다.'; return 1; }
@@ -227,7 +241,7 @@ otos_native_install() {
   if ! otos_native_require_array "$otos_native_temp/plugins-after.json" installed; then otos_native_restore_source || true; return 1; fi
   otos_native_enabled=0
   otos_plugin_index=0
-  while otos_plugin_id="$(otos_native_json "$otos_native_temp/plugins-after.json" "installed.$otos_plugin_index.pluginId")"; do
+  while otos_plugin_id="$(otos_native_json "$otos_native_temp/plugins-after.json" "installed.$otos_plugin_index.pluginId" 2>/dev/null)"; do
     if [ "$otos_plugin_id" = "$otos_native_selector" ] &&
       [ "$(otos_native_json "$otos_native_temp/plugins-after.json" "installed.$otos_plugin_index.enabled" || true)" = 'true' ]; then
       otos_native_enabled=1
