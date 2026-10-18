@@ -329,6 +329,8 @@ fi
 archive_url="$(plutil -extract archiveUrl raw -o - "$response_file" 2>/dev/null || true)"
 repository="$(plutil -extract repository raw -o - "$response_file" 2>/dev/null || true)"
 ref="$(plutil -extract ref raw -o - "$response_file" 2>/dev/null || true)"
+[ "$repository" = 'ironman429100-rgb/ot-os' ] || fail "OT.OS 배포 저장소가 일치하지 않습니다."
+[[ "$ref" =~ ^[0-9a-f]{40}$ ]] || fail "고정된 OT.OS 배포 커밋을 받지 못했습니다."
 case "$archive_url" in
   https://*) ;;
   *) fail "안전한 OT.OS 배포 주소를 받지 못했습니다." ;;
