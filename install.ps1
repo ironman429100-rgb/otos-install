@@ -60,7 +60,7 @@ function Initialize-WindowsEnvironment([string]$TemporaryRoot) {
         $python = $launcher.Source
         $prefix = @()
     }
-    $check = 'import json,struct,sys; print(json.dumps({"version":list(sys.version_info[:2]),"bits":struct.calcsize("P")*8}))'
+    $check = 'import json,struct,sys; print(json.dumps(dict(version=list(sys.version_info[:2]),bits=struct.calcsize(''P'')*8)))'
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
