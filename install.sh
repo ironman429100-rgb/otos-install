@@ -1,5 +1,5 @@
 #!/bin/bash
-set -Eeuo pipefail
+set -euo pipefail
 install_step="설치 준비"
 trap 'printf "설치 미완료 — %s 단계에서 멈췄습니다. 같은 설치 명령으로 다시 시도해주세요.\n" "$install_step" >&2' ERR
 
