@@ -53,15 +53,21 @@ jobs:
           $parseErrors = $null
           $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'install.ps1'), [ref]$tokens, [ref]$parseErrors)
           if ($parseErrors.Count) { throw "Windows PowerShell 5.1 parse failed: $($parseErrors -join '; ')" }
-          $names = @('Stop-Install', 'Invoke-QuietExternal', 'Initialize-WindowsRuntime')
+          $names = @('Stop-Install', 'Write-InstallEvent', 'Invoke-QuietExternal', 'Initialize-WindowsRuntime')
           foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
             if ($names -contains $definition.Name) { Invoke-Expression $definition.Extent.Text }
           }
+          $installLog = Join-Path $env:RUNNER_TEMP 'installer-test.log'
           $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
           $windowsRoot = Join-Path $env:RUNNER_TEMP 'ot-os-windows-test'
           $runtime = Initialize-WindowsRuntime $product $plugin $env:RUNNER_TEMP
           if ($runtime -ne (Join-Path $product 'windows-runtime\python\python.exe')) { throw 'Installer chose the wrong Python runtime.' }
-          Write-Host 'Windows PowerShell 5.1 installer runtime validation passed.'
+          $pycache = Join-Path $product 'windows-runtime\python\Lib\site-packages\__pycache__'
+          New-Item -ItemType Directory -Path $pycache -Force | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $pycache 'resume-test.pyc'), [byte[]]@(1, 2, 3))
+          $runtimeAgain = Initialize-WindowsRuntime $product $plugin $env:RUNNER_TEMP
+          if ($runtimeAgain -ne $runtime) { throw 'Runtime revalidation with generated Python cache failed.' }
+          Write-Host 'Windows PowerShell 5.1 installer runtime validation and resume revalidation passed.'
       - name: Launch packaged Chromium after installer validation
         shell: pwsh
         run: |
