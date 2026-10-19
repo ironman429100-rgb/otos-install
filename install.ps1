@@ -9,10 +9,70 @@ if ($Token -notmatch '^[A-Za-z0-9_-]{32,128}$') { throw 'OT.OS 설치 토큰이 
 if ($RedeemUrl -notmatch '^https://') { throw 'OT.OS 설치 권한 확인 주소가 올바르지 않습니다.' }
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$previousPythonDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
+$env:PYTHONDONTWRITEBYTECODE = '1'
 $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
 $runtimeArchiveUrl = 'https://github.com/ironman429100-rgb/otos-install/releases/download/windows-runtime-20261019-test/otos-windows-runtime-20261019.zip'
 $runtimeArchiveSha256 = '8e6dc5d58393328800b487cdd2cd809aeb4996013d8734e9603689d59b87e5a7'
 $windowsRoot = Join-Path $env:USERPROFILE 'Documents\Codex\OT.OS-Windows'
+$installerRoot = Join-Path $env:LOCALAPPDATA 'OT.OS\installer'
+$installerCache = Join-Path $installerRoot 'cache'
+$installerLogRoot = Join-Path $installerRoot 'logs'
+$pendingInstallPath = Join-Path $installerRoot 'pending.json'
+$installRunId = [guid]::NewGuid().ToString('N')
+New-Item -ItemType Directory -Path $installerCache, $installerLogRoot -Force | Out-Null
+$installLog = Join-Path $installerLogRoot ("install-$installRunId.log")
+foreach ($safeDirectory in @($installerRoot, $installerCache, $installerLogRoot)) {
+  if ((Get-Item -LiteralPath $safeDirectory).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'OT.OS 설치 기록 경로가 연결 폴더여서 중단했습니다.' }
+}
+
+function Write-InstallEvent([string]$Message) {
+  $safe = if ($Token) { $Message.Replace($Token, '[토큰 가림]') } else { $Message }
+  Add-Content -LiteralPath $installLog -Value ((Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK') + ' | ' + $safe) -Encoding UTF8
+}
+
+function Write-InstallProgress([string]$Message) {
+  Write-Host ('  ' + $Message)
+  Write-InstallEvent (($script:installStep) + ' | ' + $Message)
+}
+
+function Save-PendingInstall([string]$Version, [string]$Ref, [string]$BackupPath) {
+  [ordered]@{
+    schema = 1
+    phase = 'placed'
+    target = [IO.Path]::GetFullPath($Target)
+    version = $Version
+    ref = $Ref
+    runtimeSha256 = $runtimeArchiveSha256
+    backupPath = $BackupPath
+    updatedAt = [DateTime]::UtcNow.ToString('o')
+  } | ConvertTo-Json -Compress | Set-Content -LiteralPath $pendingInstallPath -Encoding UTF8
+  Write-InstallEvent '설치 폴더 배치 완료; Codex 등록 대기'
+}
+
+function Get-VerifiedRuntimeArchive([string]$TemporaryRoot) {
+  $cached = Join-Path $installerCache ("runtime-$runtimeArchiveSha256.zip")
+  if (Test-Path -LiteralPath $cached -PathType Leaf) {
+    $item = Get-Item -LiteralPath $cached -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Install '실행 환경 캐시 파일이 연결 경로여서 중단했습니다.' }
+    if ((Get-FileHash -LiteralPath $cached -Algorithm SHA256).Hash.ToLowerInvariant() -eq $runtimeArchiveSha256) {
+      Write-InstallProgress '검증된 Windows 실행 환경 ZIP을 재사용합니다.'
+      return $cached
+    }
+    Write-InstallProgress '기존 실행 환경 ZIP 검증에 실패해 다시 내려받습니다.'
+    Remove-Item -LiteralPath $cached -Force -ErrorAction Stop
+  }
+  $download = Join-Path $TemporaryRoot 'windows-runtime.download.zip'
+  Write-InstallProgress 'Windows 실행 환경 ZIP(약 440MB)을 내려받고 있습니다.'
+  try { Invoke-WebRequest -UseBasicParsing -Uri $runtimeArchiveUrl -OutFile $download -ErrorAction Stop }
+  catch { Stop-Install 'Windows 실행 환경을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
+  if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeArchiveSha256) {
+    Stop-Install 'Windows 실행 환경 ZIP의 SHA-256 검증에 실패했습니다.'
+  }
+  Move-Item -LiteralPath $download -Destination $cached -Force -ErrorAction Stop
+  Write-InstallProgress 'Windows 실행 환경 ZIP의 SHA-256 확인을 마쳤습니다.'
+  return $cached
+}
 
 function Stop-Install([string]$Message) {
   throw "OT.OS 설치 실패: $Message"
@@ -21,6 +81,7 @@ function Stop-Install([string]$Message) {
 # Windows buyer candidate. Keep the existing buyer token, product backup and
 # Codex marketplace checks; prepare Windows dependencies before registration.
 function Invoke-QuietExternal([string]$Executable, [string[]]$Arguments, [string]$LogPath, [string]$Failure) {
+    Write-InstallEvent ("외부 명령 시작: " + $Failure)
     $previousPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -29,6 +90,7 @@ function Invoke-QuietExternal([string]$Executable, [string[]]$Arguments, [string
     } finally {
         $ErrorActionPreference = $previousPreference
     }
+    Write-InstallEvent ("외부 명령 종료 코드: " + $exitCode)
     if ($exitCode -ne 0) { Stop-Install $Failure }
 }
 
@@ -87,14 +149,14 @@ function Initialize-OtosNative([string]$TemporaryRoot) {
     if ($LASTEXITCODE -ne 0) { throw '현재 Codex 실행기는 marketplace 등록을 지원하지 않아 구매 토큰을 사용하지 않았습니다.' }
     & $script:OtosNativeCli plugin add --help *> (Join-Path $TemporaryRoot 'plugin-help.txt')
     if ($LASTEXITCODE -ne 0) { throw '현재 Codex 실행기는 플러그인 등록을 지원하지 않아 구매 토큰을 사용하지 않았습니다.' }
-    $marketJson = & $script:OtosNativeCli plugin marketplace list --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+    $marketJson = & $script:OtosNativeCli plugin marketplace list --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'marketplace-list.stderr')
     if ($LASTEXITCODE -ne 0) { throw '기존 marketplace를 확인하지 못해 구매 토큰을 사용하지 않았습니다.' }
     $markets = ($marketJson -join "`n") | ConvertFrom-Json
     if (-not ($markets.PSObject.Properties.Name -contains 'marketplaces') -or $null -eq $markets.marketplaces -or $markets.marketplaces -isnot [array]) { throw 'marketplace JSON 배열이 올바르지 않아 구매 토큰을 사용하지 않았습니다.' }
     $matching = @()
     foreach ($market in @($markets.marketplaces)) {
         if (-not $market.name) { throw 'marketplace 식별자가 없어 구매 토큰을 사용하지 않았습니다.' }
-        $listJson = & $script:OtosNativeCli plugin list --marketplace $market.name --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+        $listJson = & $script:OtosNativeCli plugin list --marketplace $market.name --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'plugin-preflight.stderr')
         if ($LASTEXITCODE -ne 0) { throw '기존 플러그인을 확인하지 못해 구매 토큰을 사용하지 않았습니다.' }
         $list = ($listJson -join "`n") | ConvertFrom-Json
         if (-not ($list.PSObject.Properties.Name -contains 'installed') -or $null -eq $list.installed -or $list.installed -isnot [array]) { throw '기존 플러그인 JSON 배열이 올바르지 않아 구매 토큰을 사용하지 않았습니다.' }
@@ -165,7 +227,7 @@ function Restore-OtosNativeSource {
             Move-Item -LiteralPath $script:OtosNativeSource -Destination (Join-Path $script:OtosNativeSourceBackup 'failed-runtime') -ErrorAction Stop
         }
         Move-Item -LiteralPath (Join-Path $script:OtosNativeSourceBackup 'runtime') -Destination $script:OtosNativeSource -ErrorAction Stop
-        $restoredJson = & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+        $restoredJson = & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'plugin-restore.stderr')
         if ($LASTEXITCODE -ne 0) { throw '원래 selector의 CLI 복구에 실패했습니다.' }
         $restored = ($restoredJson -join "`n") | ConvertFrom-Json
         if (-not $restored.installedPath) { throw '복구된 cache 경로를 확인하지 못했습니다.' }
@@ -187,6 +249,7 @@ function Restore-OtosNativeSource {
 }
 
 function Install-OtosNative([string]$ProductRoot) {
+    Write-InstallProgress '플러그인 파일을 확인하고 있습니다.'
     $payload = Join-Path $ProductRoot 'plugins\otos-studio'
     $checksums = Join-Path $ProductRoot 'otos-studio-client-sha256.txt'
     $manifest = Get-Content -LiteralPath (Join-Path $payload '.codex-plugin\plugin.json') -Raw | ConvertFrom-Json
@@ -216,19 +279,22 @@ function Install-OtosNative([string]$ProductRoot) {
     } else {
         $market = Get-Content -LiteralPath (Join-Path $ProductRoot '.agents\plugins\marketplace.json') -Raw | ConvertFrom-Json
         if ($market.name -ne 'otos-buyer') { throw 'OT.OS 전용 marketplace manifest가 없습니다.' }
-        $marketJson = & $script:OtosNativeCli plugin marketplace add $ProductRoot --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+        Write-InstallProgress 'Codex marketplace를 등록하고 있습니다.'
+        $marketJson = & $script:OtosNativeCli plugin marketplace add $ProductRoot --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'marketplace-add.stderr')
         if ($LASTEXITCODE -ne 0) { throw 'OT.OS 전용 marketplace 등록에 실패했습니다.' }
         $marketJson | Set-Content -LiteralPath (Join-Path $script:OtosNativeTemporaryRoot 'marketplace-add.json')
         $script:OtosNativeSelector = 'otos-studio@otos-buyer'
         $script:OtosNativeMarketplace = 'otos-buyer'
     }
     try {
-    $installJson = & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+    Write-InstallProgress 'Codex 플러그인을 등록하고 있습니다.'
+    $installJson = & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'plugin-add.stderr')
     if ($LASTEXITCODE -ne 0) { throw 'Codex native 플러그인 등록에 실패했습니다. 파일 복사만 완료된 상태입니다.' }
     $installed = ($installJson -join "`n") | ConvertFrom-Json
     if ($installed.pluginId -ne $script:OtosNativeSelector -or -not $installed.installedPath -or -not $installed.version -or $installed.version -ne $manifest.version) { throw '등록 결과의 식별자, 설치 경로 또는 버전이 일치하지 않습니다.' }
+    Write-InstallProgress 'Codex에 설치된 파일과 활성화 상태를 확인하고 있습니다.'
     Test-OtosNativeFiles $installed.installedPath $checksums | Out-Null
-    $listJson = & $script:OtosNativeCli plugin list --marketplace $script:OtosNativeMarketplace --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+    $listJson = & $script:OtosNativeCli plugin list --marketplace $script:OtosNativeMarketplace --json 2> (Join-Path $script:OtosNativeTemporaryRoot 'plugin-list.stderr')
     if ($LASTEXITCODE -ne 0) { throw '등록한 OT.OS 상태를 확인하지 못했습니다.' }
     $list = ($listJson -join "`n") | ConvertFrom-Json
     if (-not ($list.PSObject.Properties.Name -contains 'installed') -or $null -eq $list.installed -or $list.installed -isnot [array]) { throw '등록 후 플러그인 JSON 배열이 올바르지 않습니다.' }
@@ -273,8 +339,16 @@ function Initialize-WindowsRuntime([string]$ProductRoot, [string]$PluginRoot, [s
             Stop-Install 'Windows 실행 환경 파일 검증에 실패했습니다.'
         }
     }
-    $actualFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Force | Where-Object { $_.Name -ne 'files.json' })
-    if ($actualFiles.Count -ne $verified.Count) { Stop-Install 'Windows 실행 환경 파일 수가 검증표와 다릅니다.' }
+    foreach ($actualDirectory in @(Get-ChildItem -LiteralPath $bundle -Recurse -Directory -Force)) {
+        if ($actualDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Install 'Windows 실행 환경에 연결 폴더가 있습니다.' }
+    }
+    foreach ($actualFile in @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Force | Where-Object { $_.Name -ne 'files.json' })) {
+        if ($actualFile.Attributes -band [IO.FileAttributes]::ReparsePoint) { Stop-Install 'Windows 실행 환경에 연결 파일이 있습니다.' }
+        $actualRelative = $actualFile.FullName.Substring($bundle.Length + 1).Replace('\', '/')
+        if (-not $verified.Contains($actualRelative) -and $actualRelative -notmatch '(^|/)__pycache__/[^/]+\.pyc$') {
+            Stop-Install 'Windows 실행 환경에 검증표에 없는 파일이 있습니다.'
+        }
+    }
     $runtime = Join-Path $bundle 'python\python.exe'
     $modelSource = Join-Path $bundle 'models\pose_landmarker_full.task'
     $browserSource = Join-Path $bundle 'browsers'
@@ -365,60 +439,97 @@ try {
 
   if ($reply.platform -and $reply.platform -ne 'windows') { Stop-Install 'Windows용 배포 주소를 받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
   if (-not $reply.archiveUrl -or $reply.archiveUrl -notmatch '^https://') { Stop-Install '안전한 OT.OS 배포 주소를 받지 못했습니다.' }
-  $archive = Join-Path $tempRoot 'ot-os.tar.gz'
-  $source = Join-Path $tempRoot 'source'
-  New-Item -ItemType Directory -Path $source | Out-Null
   $installStep = '설치 파일 다운로드 및 확인'
   Write-Host '[3/4] 설치 파일과 Windows 실행 환경을 확인하고 있습니다.'
-  Invoke-WebRequest -UseBasicParsing -Uri $reply.archiveUrl -OutFile $archive
-  Invoke-QuietExternal 'tar.exe' @('-xzf', $archive, '-C', $source, '--strip-components=1') (Join-Path $tempRoot 'extract.log') '배포 파일을 풀지 못했습니다.'
-
-  $product = Join-Path $source 'product'
-  $manifestPath = Join-Path $product 'manifest.json'
-  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Stop-Install '배포본에 product/manifest.json이 없습니다.' }
-  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-  if ($manifest.productId -ne 'otos' -or -not $manifest.version -or $manifest.platform -ne 'windows') {
-    Stop-Install 'Windows용 OT.OS 배포본을 확인할 수 없습니다. 같은 설치 명령으로 다시 시도해주세요.'
-  }
-
-  Test-OtosNativeFiles (Join-Path $product 'plugins\otos-studio') (Join-Path $product 'otos-studio-client-sha256.txt') | Out-Null
-  $plugin = Test-WindowsPackage $product $reply
-  if (Test-Path -LiteralPath (Join-Path $product 'windows-runtime')) { Stop-Install 'Windows 실행 환경이 중복되어 설치를 중단했습니다.' }
-  $runtimeArchive = Join-Path $tempRoot 'windows-runtime.zip'
-  try { Invoke-WebRequest -UseBasicParsing -Uri $runtimeArchiveUrl -OutFile $runtimeArchive -ErrorAction Stop }
-  catch { Stop-Install 'Windows 실행 환경을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
-  if ((Get-FileHash -LiteralPath $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeArchiveSha256) {
-    Stop-Install 'Windows 실행 환경 ZIP의 SHA-256 검증에 실패했습니다.'
-  }
-  Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $product -ErrorAction Stop
-  $runtime = Initialize-WindowsRuntime $product $plugin $tempRoot
-
-  $parent = Split-Path -Parent $Target
-  New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  $stage = Join-Path $parent ('.ot-os-staging-' + [guid]::NewGuid().ToString('N'))
-  Copy-Item -LiteralPath $product -Destination $stage -Recurse
+  Write-InstallEvent '배포본 확인 단계 시작'
+  $resuming = $false
   $backup = $null
-  if (Test-Path -LiteralPath $Target) {
-    $backup = "$Target.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')-$installationId"
-    Move-Item -LiteralPath $Target -Destination $backup
-    Write-Host "기존 설치본을 백업했습니다: $backup"
-  }
-  try {
-    Move-Item -LiteralPath $stage -Destination $Target
-  } catch {
-    $activationError = $_
-    if ($backup -and -not (Test-Path -LiteralPath $Target)) {
-      try { Move-Item -LiteralPath $backup -Destination $Target } catch { Write-Warning "기존 설치 폴더를 자동 복구하지 못했습니다. 보존 위치: $backup" }
+  $parent = Split-Path -Parent $Target
+  if (Test-Path -LiteralPath $pendingInstallPath -PathType Leaf) {
+    try {
+      $pendingItem = Get-Item -LiteralPath $pendingInstallPath -ErrorAction Stop
+      if ($pendingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '연결 파일' }
+      $pending = Get-Content -LiteralPath $pendingInstallPath -Raw | ConvertFrom-Json
+      $manifestPath = Join-Path $Target 'manifest.json'
+      if ($pending.schema -ne 1 -or $pending.phase -ne 'placed' -or
+          $pending.target -ne [IO.Path]::GetFullPath($Target) -or
+          -not $pending.ref -or $pending.ref -ne $reply.ref -or $pending.runtimeSha256 -ne $runtimeArchiveSha256 -or
+          (Test-Path -LiteralPath (Join-Path $Target '.ot-os-install.json')) -or
+          -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw '재개 조건 불일치' }
+      $targetItem = Get-Item -LiteralPath $Target -ErrorAction Stop
+      if ($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw '연결 폴더' }
+      $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+      if ($manifest.productId -ne 'otos' -or $manifest.platform -ne 'windows' -or $manifest.version -ne $pending.version) { throw '배포본 버전 불일치' }
+      Write-InstallProgress '이전 실행에서 배치한 파일을 다시 검증하고 있습니다. 파일이 많아 몇 분 걸릴 수 있습니다.'
+      Test-OtosNativeFiles (Join-Path $Target 'plugins\otos-studio') (Join-Path $Target 'otos-studio-client-sha256.txt') | Out-Null
+      $plugin = Test-WindowsPackage $Target $reply
+      $runtime = Initialize-WindowsRuntime $Target $plugin $tempRoot
+      $backup = $pending.backupPath
+      $resuming = $true
+      Write-InstallProgress '이전 실행의 파일 검증을 마쳤습니다. Codex 등록부터 이어갑니다.'
+    } catch {
+      Write-InstallEvent '이전 실행 재개 조건이 맞지 않아 새 배포본으로 설치합니다.'
+      Write-InstallProgress '이전 설치 상태를 재사용할 수 없어 새 파일을 확인합니다.'
     }
-    throw $activationError
   }
-  $stage = $null
-  $runtime = Join-Path $Target 'windows-runtime\python\python.exe'
+  if (-not $resuming) {
+    $archive = Join-Path $tempRoot 'ot-os.tar.gz'
+    $source = Join-Path $tempRoot 'source'
+    New-Item -ItemType Directory -Path $source | Out-Null
+    Write-InstallProgress '제품 파일(약 165MB)을 내려받고 있습니다.'
+    try { Invoke-WebRequest -UseBasicParsing -Uri $reply.archiveUrl -OutFile $archive -ErrorAction Stop }
+    catch { Stop-Install '제품 파일을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
+    Write-InstallProgress '제품 파일을 풀고 있습니다.'
+    Invoke-QuietExternal 'tar.exe' @('-xzf', $archive, '-C', $source, '--strip-components=1') (Join-Path $tempRoot 'extract.log') '배포 파일을 풀지 못했습니다.'
+
+    $product = Join-Path $source 'product'
+    $manifestPath = Join-Path $product 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Stop-Install '배포본에 product/manifest.json이 없습니다.' }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.productId -ne 'otos' -or -not $manifest.version -or $manifest.platform -ne 'windows') {
+      Stop-Install 'Windows용 OT.OS 배포본을 확인할 수 없습니다. 같은 설치 명령으로 다시 시도해주세요.'
+    }
+    Write-InstallProgress '제품과 플러그인 파일을 검증하고 있습니다.'
+    Test-OtosNativeFiles (Join-Path $product 'plugins\otos-studio') (Join-Path $product 'otos-studio-client-sha256.txt') | Out-Null
+    $plugin = Test-WindowsPackage $product $reply
+    if (Test-Path -LiteralPath (Join-Path $product 'windows-runtime')) { Stop-Install 'Windows 실행 환경이 중복되어 설치를 중단했습니다.' }
+    $runtimeArchive = Get-VerifiedRuntimeArchive $tempRoot
+    Write-InstallProgress 'Windows 실행 환경을 풀고 있습니다.'
+    Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $product -ErrorAction Stop
+    Write-InstallProgress 'Windows 실행 환경 파일을 검증하고 있습니다. 파일이 많아 몇 분 걸릴 수 있습니다.'
+    $runtime = Initialize-WindowsRuntime $product $plugin $tempRoot
+
+    $parent = Split-Path -Parent $Target
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $stage = Join-Path $parent ('.ot-os-staging-' + [guid]::NewGuid().ToString('N'))
+    Write-InstallProgress '검증된 파일을 설치 폴더에 배치하고 있습니다.'
+    Copy-Item -LiteralPath $product -Destination $stage -Recurse
+    if (Test-Path -LiteralPath $Target) {
+      $backup = "$Target.backup.$(Get-Date -Format 'yyyyMMdd-HHmmss')-$installationId"
+      Move-Item -LiteralPath $Target -Destination $backup
+      Write-Host "기존 설치본을 백업했습니다: $backup"
+      Write-InstallEvent '기존 설치 폴더 백업 완료'
+    }
+    try {
+      Move-Item -LiteralPath $stage -Destination $Target
+    } catch {
+      $activationError = $_
+      if ($backup -and -not (Test-Path -LiteralPath $Target)) {
+        try { Move-Item -LiteralPath $backup -Destination $Target } catch { Write-Warning "기존 설치 폴더를 자동 복구하지 못했습니다. 보존 위치: $backup" }
+      }
+      throw $activationError
+    }
+    $stage = $null
+    Save-PendingInstall $manifest.version $reply.ref $backup
+    $runtime = Join-Path $Target 'windows-runtime\python\python.exe'
+  }
   $installStep = '플러그인 등록 및 활성화'
   Write-Host '[4/4] Codex에 OT.OS를 설치하고 있습니다.'
+  Write-InstallEvent 'Codex 등록 단계 시작'
   try {
     $nativeInstalled = Install-OtosNative $Target
     $installedPlugin = Join-Path $Target 'plugins\otos-studio'
+    Write-InstallProgress 'Codex 작업용 Python 연결을 확인하고 있습니다.'
     Invoke-QuietExternal $runtime @((Join-Path $installedPlugin 'scripts\browser_probe.py'), '--resolve-python', '--python', $runtime) (Join-Path $tempRoot 'runtime-resolution.log') 'Codex 작업용 Python 연결을 확인하지 못했습니다.'
   } catch {
     $nativeError = $_
@@ -428,7 +539,7 @@ try {
       try {
         Move-Item -LiteralPath $Target -Destination $failedTarget
         Move-Item -LiteralPath $backup -Destination $Target
-        & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json > (Join-Path $tempRoot 'product-restore.json') 2> (Join-Path $script:OtosNativeTemporaryRoot 'codex.stderr')
+        & $script:OtosNativeCli plugin add $script:OtosNativeSelector --json > (Join-Path $tempRoot 'product-restore.json') 2> (Join-Path $script:OtosNativeTemporaryRoot 'product-restore.stderr')
         if ($LASTEXITCODE -ne 0) { Write-Warning "기존 플러그인 재등록을 확인하지 못했습니다. 보존 위치: $failedTarget" }
       } catch { Write-Warning "기존 설치 폴더를 자동 복구하지 못했습니다. 보존 위치: $backup / $failedTarget" }
     }
@@ -452,8 +563,12 @@ try {
     ref = $reply.ref
     installedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
   } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Target '.ot-os-install.json') -Encoding utf8
+  Remove-Item -LiteralPath $pendingInstallPath -Force -ErrorAction SilentlyContinue
+  Write-InstallEvent '설치 완료; 실제 OT.OS 작업 흐름은 확인되지 않음'
   Write-Host '설치 완료 — OT.OS 등록·활성화와 Windows 실행 환경을 확인했습니다.'
   Write-Host '이제 Codex에서 OT.OS로 원하는 작업과 상품 URL을 보내세요.'
+  Write-Host "설치 기록: $installLog"
+  if ($backup) { Write-Host "이전 설치본 백업: $backup (실제 작업을 확인한 뒤 필요 없으면 직접 삭제할 수 있습니다.)" }
 } catch {
   $originalError = $_
   $detail = '네트워크 접근을 확인한 뒤 같은 설치 명령으로 다시 시도해주세요.'
@@ -469,8 +584,21 @@ try {
     ('오류: ' + $cause),
     ('기록 시각(UTC): ' + [DateTime]::UtcNow.ToString('o'))
   ) | Set-Content -LiteralPath (Join-Path $tempRoot 'failure.txt') -Encoding UTF8
-  throw ('설치 미완료 — ' + $installStep + ' 단계에서 멈췄습니다. ' + $detail)
+  Write-InstallEvent ('설치 미완료 | 단계: ' + $installStep + ' | 원인: ' + $cause)
+  foreach ($diagnosticName in @('failure.txt', 'extract.log', 'windows-pose.log', 'runtime-resolution.log', 'marketplace-list.stderr', 'plugin-preflight.stderr', 'marketplace-add.stderr', 'plugin-add.stderr', 'plugin-list.stderr', 'plugin-restore.stderr', 'product-restore.stderr')) {
+    $diagnosticPath = Join-Path $tempRoot $diagnosticName
+    if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+      $diagnosticText = Get-Content -LiteralPath $diagnosticPath -Raw -ErrorAction SilentlyContinue
+      if ($null -eq $diagnosticText) { $diagnosticText = '' }
+      if ($Token) { $diagnosticText = $diagnosticText.Replace($Token, '[토큰 가림]') }
+      if ($diagnosticText.Length -gt 65536) { $diagnosticText = $diagnosticText.Substring(0, 65536) }
+      Set-Content -LiteralPath (Join-Path $installerLogRoot ($installRunId + '-' + $diagnosticName)) -Value $diagnosticText -Encoding UTF8
+    }
+  }
+  throw ('설치 미완료 — ' + $installStep + ' 단계에서 멈췄습니다. ' + $detail + ' 설치 기록: ' + $installLog)
 } finally {
   if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
   if (-not $preserveFailureDiagnostics) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($null -eq $previousPythonDontWriteBytecode) { Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue }
+  else { $env:PYTHONDONTWRITEBYTECODE = $previousPythonDontWriteBytecode }
 }
