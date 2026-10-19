@@ -38,6 +38,35 @@ jobs:
           New-Item -ItemType Directory -Path $product -Force | Out-Null
           Expand-Archive -LiteralPath $archive -DestinationPath $product
           if (-not (Test-Path -LiteralPath (Join-Path $product 'windows-runtime\files.json'))) { throw 'Buyer runtime release layout is invalid.' }
+      - name: Verify interruption record and runtime cache in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'install.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count) { throw "Installer parse failed: $($parseErrors -join '; ')" }
+          $names = @('Write-InstallEvent', 'Write-InstallProgress', 'Save-PendingInstall', 'Get-VerifiedRuntimeArchive')
+          foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            if ($names -contains $definition.Name) { Invoke-Expression $definition.Extent.Text }
+          }
+          $Token = 'test-token-must-never-be-logged-1234567890'
+          $Target = Join-Path $env:RUNNER_TEMP 'OT.OS'
+          $installStep = 'test'
+          $installerRoot = Join-Path $env:RUNNER_TEMP 'installer-state'
+          $installerCache = Join-Path $installerRoot 'cache'
+          New-Item -ItemType Directory -Path $installerCache -Force | Out-Null
+          $installLog = Join-Path $installerRoot 'install.log'
+          $pendingInstallPath = Join-Path $installerRoot 'pending.json'
+          $runtimeArchiveSha256 = '8e6dc5d58393328800b487cdd2cd809aeb4996013d8734e9603689d59b87e5a7'
+          $runtimeArchiveUrl = 'https://invalid.example/runtime.zip'
+          Write-InstallEvent "test event $Token"
+          Save-PendingInstall 'test-version' 'test-ref' (Join-Path $env:RUNNER_TEMP 'OT.OS.backup.test')
+          if ((Get-Content -LiteralPath $installLog -Raw).Contains($Token) -or (Get-Content -LiteralPath $pendingInstallPath -Raw).Contains($Token)) { throw 'Token leaked to installer state.' }
+          $cached = Join-Path $installerCache "runtime-$runtimeArchiveSha256.zip"
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'buyer-runtime.zip') -Destination $cached
+          $selected = Get-VerifiedRuntimeArchive $env:RUNNER_TEMP
+          if ($selected -ne $cached) { throw 'Verified runtime cache was not reused.' }
+          Write-Host 'Interruption record redaction and verified cache reuse passed.'
       - name: Verify installer runtime stage in Windows PowerShell 5.1
         shell: powershell
         run: |
