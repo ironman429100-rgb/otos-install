@@ -39,6 +39,15 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
           ./build-windows-runtime.ps1 -ProductRoot $product -BuilderPython (Get-Command python).Source -EmbeddedPythonZip $zip -EmbeddedPythonZipSha256 $hash
           Write-Host "Windows runtime build passed; files: $((Get-Content (Join-Path $product 'windows-runtime\files.json') -Raw | ConvertFrom-Json).files.Count)"
+      - name: Archive pristine Windows runtime
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'candidate-product\windows-runtime'
+          $archive = Join-Path $env:RUNNER_TEMP 'otos-windows-runtime-20261019.zip'
+          Compress-Archive -LiteralPath $root -DestinationPath $archive -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "Runtime archive SHA-256: $hash"
+          Write-Host "Runtime archive bytes: $((Get-Item -LiteralPath $archive).Length)"
       - name: Verify installer runtime stage in Windows PowerShell 5.1
         shell: powershell
         run: |
@@ -73,3 +82,8 @@ jobs:
           $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $product 'windows-runtime\browsers'
           & $runtime -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()'
           if ($LASTEXITCODE -ne 0) { throw 'Bundled Chromium launch failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otos-windows-runtime-20261019
+          path: ${{ runner.temp }}/otos-windows-runtime-20261019.zip
+          retention-days: 7
