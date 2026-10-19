@@ -245,7 +245,7 @@ function Install-OtosNative([string]$ProductRoot) {
 }
 
 function Test-WindowsPackage([string]$ProductRoot, $Reply) {
-    if ($Reply.platform -ne 'windows') { Stop-Install 'Windows용 설치 권한과 배포본을 확인하지 못했습니다.' }
+    if ($Reply.platform -and $Reply.platform -ne 'windows') { Stop-Install 'Windows용 설치 권한과 배포본을 확인하지 못했습니다.' }
     $plugin = Join-Path $ProductRoot 'plugins\otos-studio'
     foreach ($relative in @('requirements.txt', 'requirements-windows.txt', 'scripts\windows_pose.py', 'scripts\browser_probe.py')) {
         if (-not (Test-Path -LiteralPath (Join-Path $plugin $relative) -PathType Leaf)) {
@@ -363,7 +363,7 @@ try {
     Stop-Install '설치 서버에 연결하지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.'
   }
 
-  if ($reply.platform -ne 'windows') { Stop-Install 'Windows용 배포 주소를 받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
+  if ($reply.platform -and $reply.platform -ne 'windows') { Stop-Install 'Windows용 배포 주소를 받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
   if (-not $reply.archiveUrl -or $reply.archiveUrl -notmatch '^https://') { Stop-Install '안전한 OT.OS 배포 주소를 받지 못했습니다.' }
   $archive = Join-Path $tempRoot 'ot-os.tar.gz'
   $source = Join-Path $tempRoot 'source'
