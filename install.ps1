@@ -9,6 +9,8 @@ if ($Token -notmatch '^[A-Za-z0-9_-]{32,128}$') { throw 'OT.OS 설치 토큰이 
 if ($RedeemUrl -notmatch '^https://') { throw 'OT.OS 설치 권한 확인 주소가 올바르지 않습니다.' }
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$previousPythonDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
+$env:PYTHONDONTWRITEBYTECODE = '1'
 $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
 $runtimeArchiveUrl = 'https://github.com/ironman429100-rgb/otos-install/releases/download/windows-runtime-20261019-test/otos-windows-runtime-20261019.zip'
 $runtimeArchiveSha256 = '8e6dc5d58393328800b487cdd2cd809aeb4996013d8734e9603689d59b87e5a7'
@@ -597,4 +599,6 @@ try {
 } finally {
   if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Recurse -Force }
   if (-not $preserveFailureDiagnostics) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($null -eq $previousPythonDontWriteBytecode) { Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue }
+  else { $env:PYTHONDONTWRITEBYTECODE = $previousPythonDontWriteBytecode }
 }
