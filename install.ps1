@@ -9,7 +9,6 @@ if ($Token -notmatch '^[A-Za-z0-9_-]{32,128}$') { throw 'OT.OS 설치 토큰이 
 if ($RedeemUrl -notmatch '^https://') { throw 'OT.OS 설치 권한 확인 주소가 올바르지 않습니다.' }
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$modelUrl = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task'
 $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
 $windowsRoot = Join-Path $env:USERPROFILE 'Documents\Codex\OT.OS-Windows'
 
@@ -50,31 +49,7 @@ function Initialize-WindowsEnvironment([string]$TemporaryRoot) {
     if (-not @($chromePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }).Count) {
         Stop-Install 'Google Chrome을 설치한 뒤 다시 시도해주세요.'
     }
-    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
-    if ($launcher) {
-        $python = $launcher.Source
-        $prefix = @('-3')
-    } else {
-        $launcher = Get-Command python.exe -ErrorAction SilentlyContinue
-        if (-not $launcher) { Stop-Install 'Python 3.10 이상 x64를 설치한 뒤 다시 시도해주세요.' }
-        $python = $launcher.Source
-        $prefix = @()
-    }
-    $check = 'import json,struct,sys; print(json.dumps(dict(version=list(sys.version_info[:2]),bits=struct.calcsize(''P'')*8)))'
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $information = & $python @prefix -c $check 2> (Join-Path $TemporaryRoot 'python-version.stderr')
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-    if ($exitCode -ne 0) { Stop-Install 'Python 버전을 확인하지 못했습니다.' }
-    try { $details = ($information -join '') | ConvertFrom-Json } catch { Stop-Install 'Python 버전 응답이 올바르지 않습니다.' }
-    if ($details.bits -ne 64 -or $details.version[0] -ne 3 -or $details.version[1] -lt 10) {
-        Stop-Install 'Python 3.10 이상 x64가 필요합니다.'
-    }
-    return [pscustomobject]@{ Executable = $python; Prefix = $prefix }
+    # Python is supplied and verified with the Windows product archive.
 }
 
 function Initialize-OtosNative([string]$TemporaryRoot) {
@@ -278,7 +253,32 @@ function Test-WindowsPackage([string]$ProductRoot, $Reply) {
     return $plugin
 }
 
-function Initialize-WindowsRuntime([string]$PluginRoot, [string]$TemporaryRoot, $Python) {
+function Initialize-WindowsRuntime([string]$ProductRoot, [string]$PluginRoot, [string]$TemporaryRoot) {
+    $bundle = Join-Path $ProductRoot 'windows-runtime'
+    $manifestPath = Join-Path $bundle 'files.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Stop-Install 'Windows 실행 환경이 배포본에 없습니다. 새 설치 명령어를 받아주세요.' }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.schema -ne 1 -or $manifest.platform -ne 'win-x64' -or -not $manifest.files) { Stop-Install 'Windows 실행 환경 검증표가 올바르지 않습니다.' }
+    $verified = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $manifest.files) {
+        $relative = [string]$entry.path
+        if (-not $relative -or $relative.Contains('\') -or $relative.Contains(':') -or $relative.StartsWith('/') -or ($relative.Split('/') -contains '') -or ($relative.Split('/') -contains '..') -or ($relative.Split('/') -contains '.') -or $entry.sha256 -notmatch '^[0-9a-f]{64}$' -or -not $verified.Add($relative)) {
+            Stop-Install 'Windows 실행 환경 검증표에 안전하지 않은 경로가 있습니다.'
+        }
+        $file = Join-Path $bundle $relative
+        $item = Get-Item -LiteralPath $file -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+            Stop-Install 'Windows 실행 환경 파일 검증에 실패했습니다.'
+        }
+    }
+    $actualFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Force | Where-Object { $_.Name -ne 'files.json' })
+    if ($actualFiles.Count -ne $verified.Count) { Stop-Install 'Windows 실행 환경 파일 수가 검증표와 다릅니다.' }
+    $runtime = Join-Path $bundle 'python\python.exe'
+    $modelSource = Join-Path $bundle 'models\pose_landmarker_full.task'
+    $browserSource = Join-Path $bundle 'browsers'
+    if (-not (Test-Path -LiteralPath $runtime -PathType Leaf) -or -not (Test-Path -LiteralPath $modelSource -PathType Leaf) -or -not (Test-Path -LiteralPath $browserSource -PathType Container) -or @((Get-ChildItem -LiteralPath $browserSource -Directory)).Count -eq 0) {
+        Stop-Install 'Windows 실행 환경의 필수 파일이 빠졌습니다.'
+    }
     if (Test-Path -LiteralPath $windowsRoot) {
         $rootItem = Get-Item -LiteralPath $windowsRoot -ErrorAction Stop
         if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -299,37 +299,29 @@ function Initialize-WindowsRuntime([string]$PluginRoot, [string]$TemporaryRoot, 
             Stop-Install 'Windows 포즈 모델 파일이 연결 경로여서 설치를 중단했습니다.'
         }
     }
-    if (-not (Test-Path -LiteralPath $model -PathType Leaf)) {
-        Write-Host '  Windows 분석 모델을 내려받고 있습니다.'
-        $download = Join-Path $TemporaryRoot 'pose_landmarker_full.task'
-        try { Invoke-WebRequest -UseBasicParsing -Uri $modelUrl -OutFile $download -ErrorAction Stop }
-        catch { Stop-Install 'Windows 포즈 모델을 내려받지 못했습니다. 네트워크를 확인한 뒤 새 명령어로 다시 시도해주세요.' }
-        if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $modelSha256) {
-            Stop-Install 'Windows 포즈 모델 파일 검증에 실패했습니다.'
-        }
-        Move-Item -LiteralPath $download -Destination $model -ErrorAction Stop
-    }
+    if ((Get-FileHash -LiteralPath $modelSource -Algorithm SHA256).Hash.ToLowerInvariant() -ne $modelSha256) { Stop-Install '배포본의 Windows 포즈 모델 검증에 실패했습니다.' }
+    if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { Copy-Item -LiteralPath $modelSource -Destination $model -ErrorAction Stop }
     if ((Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash.ToLowerInvariant() -ne $modelSha256) {
         Stop-Install '기존 Windows 포즈 모델의 파일 검증에 실패했습니다. 설치 상태를 확인해주세요.'
     }
 
-    $runtimeRoot = Join-Path $windowsRoot 'runtime'
-    if (Test-Path -LiteralPath $runtimeRoot) {
-        $runtimeItem = Get-Item -LiteralPath $runtimeRoot -ErrorAction Stop
-        if (-not $runtimeItem.PSIsContainer -or ($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            Stop-Install 'Windows Python 환경 경로를 안전하게 사용할 수 없습니다.'
+    $browserTarget = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+    New-Item -ItemType Directory -Path $browserTarget -Force -ErrorAction Stop | Out-Null
+    foreach ($browser in @(Get-ChildItem -LiteralPath $browserSource -Directory)) {
+        $destination = Join-Path $browserTarget $browser.Name
+        if (Test-Path -LiteralPath $destination) {
+            $existing = Get-Item -LiteralPath $destination -ErrorAction Stop
+            if (-not $existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Stop-Install '기존 브라우저 캐시 경로를 안전하게 사용할 수 없습니다.' }
+        }
+        Copy-Item -LiteralPath $browser.FullName -Destination $browserTarget -Recurse -Force -ErrorAction Stop
+    }
+    foreach ($entry in @($manifest.files | Where-Object { $_.path -like 'browsers/*' })) {
+        $relative = ([string]$entry.path).Substring('browsers/'.Length)
+        $installedBrowserFile = Join-Path $browserTarget $relative
+        if (-not (Test-Path -LiteralPath $installedBrowserFile -PathType Leaf) -or (Get-FileHash -LiteralPath $installedBrowserFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.sha256) {
+            Stop-Install '상세 출력용 브라우저 파일 검증에 실패했습니다.'
         }
     }
-    $runtime = Join-Path $runtimeRoot 'Scripts\python.exe'
-    if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
-        $arguments = @($Python.Prefix) + @('-m', 'venv', $runtimeRoot)
-        Invoke-QuietExternal $Python.Executable $arguments (Join-Path $TemporaryRoot 'python-venv.log') 'Windows Python 실행 환경을 만들지 못했습니다.'
-    }
-    if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) { Stop-Install 'Windows Python 실행 파일을 찾지 못했습니다.' }
-    Write-Host '  Windows Python 패키지를 설치하고 있습니다.'
-    Invoke-QuietExternal $runtime @('-m', 'pip', 'install', '--only-binary=:all:', '-r', (Join-Path $PluginRoot 'requirements.txt'), '-r', (Join-Path $PluginRoot 'requirements-windows.txt')) (Join-Path $TemporaryRoot 'python-packages.log') 'Windows용 Python 패키지 설치에 실패했습니다.'
-    Write-Host '  상세 출력용 브라우저를 준비하고 있습니다.'
-    Invoke-QuietExternal $runtime @('-m', 'playwright', 'install', 'chromium') (Join-Path $TemporaryRoot 'chromium.log') '상세 출력용 브라우저 설치에 실패했습니다.'
 
     $poseProbe = @'
 import importlib.util
@@ -354,7 +346,7 @@ New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
   $installStep = '설치 환경 확인'
   Write-Host '[1/4] 설치를 준비하고 있습니다.'
-  $python = Initialize-WindowsEnvironment $tempRoot
+  Initialize-WindowsEnvironment $tempRoot
   Initialize-OtosNative $tempRoot
   $installationId = [guid]::NewGuid().ToString()
   $installStep = '구매 권한 확인'
@@ -389,7 +381,7 @@ try {
 
   Test-OtosNativeFiles (Join-Path $product 'plugins\otos-studio') (Join-Path $product 'otos-studio-client-sha256.txt') | Out-Null
   $plugin = Test-WindowsPackage $product $reply
-  $runtime = Initialize-WindowsRuntime $plugin $tempRoot $python
+  $runtime = Initialize-WindowsRuntime $product $plugin $tempRoot
 
   $parent = Split-Path -Parent $Target
   New-Item -ItemType Directory -Path $parent -Force | Out-Null
@@ -411,6 +403,7 @@ try {
     throw $activationError
   }
   $stage = $null
+  $runtime = Join-Path $Target 'windows-runtime\python\python.exe'
   $installStep = '플러그인 등록 및 활성화'
   Write-Host '[4/4] Codex에 OT.OS를 설치하고 있습니다.'
   try {
