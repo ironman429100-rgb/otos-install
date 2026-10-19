@@ -65,6 +65,13 @@ jobs:
           $pycache = Join-Path $product 'windows-runtime\python\Lib\site-packages\__pycache__'
           New-Item -ItemType Directory -Path $pycache -Force | Out-Null
           [IO.File]::WriteAllBytes((Join-Path $pycache 'resume-test.pyc'), [byte[]]@(1, 2, 3))
+          $runtimeManifest = Get-Content -LiteralPath (Join-Path $product 'windows-runtime\files.json') -Raw | ConvertFrom-Json
+          $hashMismatches = @($runtimeManifest.files | Where-Object {
+            $path = Join-Path (Join-Path $product 'windows-runtime') $_.path
+            -not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $_.sha256
+          })
+          Write-Host "Changed runtime manifest files after first validation: $($hashMismatches.Count)"
+          if ($hashMismatches.Count) { $hashMismatches | Select-Object -First 5 -ExpandProperty path | Write-Host }
           $runtimeAgain = Initialize-WindowsRuntime $product $plugin $env:RUNNER_TEMP
           if ($runtimeAgain -ne $runtime) { throw 'Runtime revalidation with generated Python cache failed.' }
           Write-Host 'Windows PowerShell 5.1 installer runtime validation and resume revalidation passed.'
