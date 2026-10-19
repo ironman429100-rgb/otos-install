@@ -20,34 +20,12 @@ jobs:
       - name: Parse buyer and builder scripts
         shell: pwsh
         run: |
-          foreach ($path in @('install.ps1', 'build-windows-runtime.ps1')) {
+          foreach ($path in @('install.ps1')) {
             $tokens = $null
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path), [ref]$tokens, [ref]$parseErrors) | Out-Null
             if ($parseErrors.Count) { throw "PowerShell 구문 오류: $path : $($parseErrors -join '; ')" }
           }
-      - name: Build portable runtime with Windows dependencies
-        shell: pwsh
-        run: |
-          $product = Join-Path $env:RUNNER_TEMP 'candidate-product'
-          $plugin = Join-Path $product 'plugins\otos-studio'
-          New-Item -ItemType Directory -Path $plugin -Force | Out-Null
-          @('playwright>=1.40,<2', 'Pillow>=10,<13') | Set-Content -LiteralPath (Join-Path $plugin 'requirements.txt') -Encoding ASCII
-          @('mediapipe==0.10.32', 'playwright==1.55.0') | Set-Content -LiteralPath (Join-Path $plugin 'requirements-windows.txt') -Encoding ASCII
-          $zip = Join-Path $env:RUNNER_TEMP 'python-embed.zip'
-          Invoke-WebRequest -UseBasicParsing -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile $zip
-          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-          ./build-windows-runtime.ps1 -ProductRoot $product -BuilderPython (Get-Command python).Source -EmbeddedPythonZip $zip -EmbeddedPythonZipSha256 $hash
-          Write-Host "Windows runtime build passed; files: $((Get-Content (Join-Path $product 'windows-runtime\files.json') -Raw | ConvertFrom-Json).files.Count)"
-      - name: Archive pristine Windows runtime
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP 'candidate-product\windows-runtime'
-          $archive = Join-Path $env:RUNNER_TEMP 'otos-windows-runtime-20261019.zip'
-          Compress-Archive -LiteralPath $root -DestinationPath $archive -CompressionLevel Optimal
-          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "Runtime archive SHA-256: $hash"
-          Write-Host "Runtime archive bytes: $((Get-Item -LiteralPath $archive).Length)"
       - name: Download buyer runtime release and extract it
         shell: pwsh
         run: |
@@ -87,15 +65,10 @@ jobs:
       - name: Launch packaged Chromium after installer validation
         shell: pwsh
         run: |
-          $product = Join-Path $env:RUNNER_TEMP 'candidate-product'
+          $product = Join-Path $env:RUNNER_TEMP 'buyer-product'
           $runtime = Join-Path $product 'windows-runtime\python\python.exe'
           & $runtime -c 'import PIL, mediapipe, playwright.async_api; print("runtime imports passed")'
           if ($LASTEXITCODE -ne 0) { throw 'Portable Python package imports failed.' }
           $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $product 'windows-runtime\browsers'
           & $runtime -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()'
           if ($LASTEXITCODE -ne 0) { throw 'Bundled Chromium launch failed.' }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: otos-windows-runtime-20261019
-          path: ${{ runner.temp }}/otos-windows-runtime-20261019.zip
-          retention-days: 7
