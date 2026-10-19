@@ -48,10 +48,22 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "Runtime archive SHA-256: $hash"
           Write-Host "Runtime archive bytes: $((Get-Item -LiteralPath $archive).Length)"
+      - name: Download buyer runtime release and extract it
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/ironman429100-rgb/otos-install/releases/download/windows-runtime-20261019-test/otos-windows-runtime-20261019.zip'
+          $archive = Join-Path $env:RUNNER_TEMP 'buyer-runtime.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne '8e6dc5d58393328800b487cdd2cd809aeb4996013d8734e9603689d59b87e5a7') { throw 'Buyer runtime release SHA-256 mismatch.' }
+          $product = Join-Path $env:RUNNER_TEMP 'buyer-product'
+          New-Item -ItemType Directory -Path $product -Force | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $product
+          if (-not (Test-Path -LiteralPath (Join-Path $product 'windows-runtime\files.json'))) { throw 'Buyer runtime release layout is invalid.' }
       - name: Verify installer runtime stage in Windows PowerShell 5.1
         shell: powershell
         run: |
-          $product = Join-Path $env:RUNNER_TEMP 'candidate-product'
+          $product = Join-Path $env:RUNNER_TEMP 'buyer-product'
           $plugin = Join-Path $product 'plugins\otos-studio'
           $scripts = Join-Path $plugin 'scripts'
           New-Item -ItemType Directory -Path $scripts -Force | Out-Null

@@ -10,6 +10,8 @@ if ($RedeemUrl -notmatch '^https://') { throw 'OT.OS 설치 권한 확인 주소
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
+$runtimeArchiveUrl = 'https://github.com/ironman429100-rgb/otos-install/releases/download/windows-runtime-20261019-test/otos-windows-runtime-20261019.zip'
+$runtimeArchiveSha256 = '8e6dc5d58393328800b487cdd2cd809aeb4996013d8734e9603689d59b87e5a7'
 $windowsRoot = Join-Path $env:USERPROFILE 'Documents\Codex\OT.OS-Windows'
 
 function Stop-Install([string]$Message) {
@@ -381,6 +383,14 @@ try {
 
   Test-OtosNativeFiles (Join-Path $product 'plugins\otos-studio') (Join-Path $product 'otos-studio-client-sha256.txt') | Out-Null
   $plugin = Test-WindowsPackage $product $reply
+  if (Test-Path -LiteralPath (Join-Path $product 'windows-runtime')) { Stop-Install 'Windows 실행 환경이 중복되어 설치를 중단했습니다.' }
+  $runtimeArchive = Join-Path $tempRoot 'windows-runtime.zip'
+  try { Invoke-WebRequest -UseBasicParsing -Uri $runtimeArchiveUrl -OutFile $runtimeArchive -ErrorAction Stop }
+  catch { Stop-Install 'Windows 실행 환경을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
+  if ((Get-FileHash -LiteralPath $runtimeArchive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeArchiveSha256) {
+    Stop-Install 'Windows 실행 환경 ZIP의 SHA-256 검증에 실패했습니다.'
+  }
+  Expand-Archive -LiteralPath $runtimeArchive -DestinationPath $product -ErrorAction Stop
   $runtime = Initialize-WindowsRuntime $product $plugin $tempRoot
 
   $parent = Split-Path -Parent $Target
