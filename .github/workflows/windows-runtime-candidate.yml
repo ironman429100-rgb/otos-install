@@ -45,3 +45,27 @@ jobs:
           & $runtime -c 'import asyncio; from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); print(b.version); b.close(); p.stop()'
           if ($LASTEXITCODE -ne 0) { throw 'Bundled Chromium launch failed.' }
           Write-Host "Windows runtime build and Chromium launch passed; files: $((Get-Content (Join-Path $product 'windows-runtime\files.json') -Raw | ConvertFrom-Json).files.Count)"
+      - name: Verify installer runtime stage in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $product = Join-Path $env:RUNNER_TEMP 'candidate-product'
+          $plugin = Join-Path $product 'plugins\otos-studio'
+          $scripts = Join-Path $plugin 'scripts'
+          New-Item -ItemType Directory -Path $scripts -Force | Out-Null
+          @'
+          def prepare():
+              import mediapipe
+          '@ | Set-Content -LiteralPath (Join-Path $scripts 'windows_pose.py') -Encoding ASCII
+          $tokens = $null
+          $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'install.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count) { throw "Windows PowerShell 5.1 parse failed: $($parseErrors -join '; ')" }
+          $names = @('Stop-Install', 'Invoke-QuietExternal', 'Initialize-WindowsRuntime')
+          foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+            if ($names -contains $definition.Name) { Invoke-Expression $definition.Extent.Text }
+          }
+          $modelSha256 = '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1'
+          $windowsRoot = Join-Path $env:RUNNER_TEMP 'ot-os-windows-test'
+          $runtime = Initialize-WindowsRuntime $product $plugin $env:RUNNER_TEMP
+          if ($runtime -ne (Join-Path $product 'windows-runtime\python\python.exe')) { throw 'Installer chose the wrong Python runtime.' }
+          Write-Host 'Windows PowerShell 5.1 installer runtime validation passed.'
