@@ -1,0 +1,32 @@
+name: Windows installer network check
+on:
+  push:
+    branches: [test/windows-curl-network-20261020]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Codex CLI
+        run: npm install --global @openai/codex@0.140.0
+      - name: Parse and exercise the installer in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'install.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors | Out-String) }
+          $caught = $null
+          try {
+            & ./install.ps1 -Token ('w_' + ('A' * 43)) -RedeemUrl 'https://127.0.0.1:1/redeem' -Target (Join-Path $env:RUNNER_TEMP 'otos-preflight')
+          } catch { $caught = $_ }
+          if (-not $caught) { throw 'The deliberately unavailable redeem endpoint unexpectedly succeeded.' }
+          $log = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'OT.OS\installer\logs') -Filter 'install-*.log' |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $log) { throw 'Installer did not write a log.' }
+          $content = Get-Content $log.FullName -Raw -Encoding UTF8
+          if ($content -notmatch 'curl.exe 구매 권한 확인 실패') { throw "curl.exe path was not exercised: $content" }
+          if ($content -match ('A' * 43)) { throw 'Token appeared in installer log.' }
