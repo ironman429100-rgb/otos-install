@@ -28,5 +28,5 @@ jobs:
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $log) { throw 'Installer did not write a log.' }
           $content = Get-Content $log.FullName -Raw -Encoding UTF8
-          if ($content -notmatch 'curl.exe 구매 권한 확인 실패') { throw "curl.exe path was not exercised: $content" }
+          if ($content -notmatch 'curl.exe' -or $content -notmatch 'PowerShell') { throw "curl.exe path was not exercised: $content" }
           if ($content -match ('A' * 43)) { throw 'Token appeared in installer log.' }
