@@ -52,8 +52,13 @@ function Save-PendingInstall([string]$Version, [string]$Ref, [string]$BackupPath
 
 function Save-OtosDownload([string]$Url, [string]$Destination) {
   if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-    & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --output $Destination $Url
-    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $Destination -PathType Leaf)) { return }
+    $oldPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --output $Destination $Url 2>$null
+      $curlExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldPreference }
+    if ($curlExit -eq 0 -and (Test-Path -LiteralPath $Destination -PathType Leaf)) { return }
     Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     Write-InstallEvent 'curl.exe 다운로드 실패; PowerShell 웹 요청으로 재시도'
   }
@@ -63,8 +68,13 @@ function Save-OtosDownload([string]$Url, [string]$Destination) {
 function Request-OtosInstallAuthorization([string]$Url, [string]$Body, [string]$TemporaryRoot) {
   if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
     $response = Join-Path $TemporaryRoot 'redeem-response.json'
-    $Body | & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --header 'Content-Type: application/json' --data-binary '@-' --output $response $Url
-    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $response -PathType Leaf)) {
+    $oldPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      $Body | & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --header 'Content-Type: application/json' --data-binary '@-' --output $response $Url 2>$null
+      $curlExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldPreference }
+    if ($curlExit -eq 0 -and (Test-Path -LiteralPath $response -PathType Leaf)) {
       return Get-Content -LiteralPath $response -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
     }
     Remove-Item -LiteralPath $response -Force -ErrorAction SilentlyContinue
