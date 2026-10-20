@@ -50,6 +50,39 @@ function Save-PendingInstall([string]$Version, [string]$Ref, [string]$BackupPath
   Write-InstallEvent '설치 폴더 배치 완료; Codex 등록 대기'
 }
 
+function Save-OtosDownload([string]$Url, [string]$Destination) {
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    $oldPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --output $Destination $Url 2>$null
+      $curlExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldPreference }
+    if ($curlExit -eq 0 -and (Test-Path -LiteralPath $Destination -PathType Leaf)) { return }
+    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    Write-InstallEvent 'curl.exe 다운로드 실패; PowerShell 웹 요청으로 재시도'
+  }
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -ErrorAction Stop
+}
+
+function Request-OtosInstallAuthorization([string]$Url, [string]$Body, [string]$TemporaryRoot) {
+  if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    $response = Join-Path $TemporaryRoot 'redeem-response.json'
+    $oldPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = 'Continue'
+      $Body | & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 20 --header 'Content-Type: application/json' --data-binary '@-' --output $response $Url 2>$null
+      $curlExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldPreference }
+    if ($curlExit -eq 0 -and (Test-Path -LiteralPath $response -PathType Leaf)) {
+      return Get-Content -LiteralPath $response -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    }
+    Remove-Item -LiteralPath $response -Force -ErrorAction SilentlyContinue
+    Write-InstallEvent 'curl.exe 구매 권한 확인 실패; PowerShell 웹 요청으로 재시도'
+  }
+  return Invoke-RestMethod -Method Post -Uri $Url -ContentType 'application/json' -Body $Body -ErrorAction Stop
+}
+
 function Get-VerifiedRuntimeArchive([string]$TemporaryRoot) {
   $cached = Join-Path $installerCache ("runtime-$runtimeArchiveSha256.zip")
   if (Test-Path -LiteralPath $cached -PathType Leaf) {
@@ -64,7 +97,7 @@ function Get-VerifiedRuntimeArchive([string]$TemporaryRoot) {
   }
   $download = Join-Path $TemporaryRoot 'windows-runtime.download.zip'
   Write-InstallProgress 'Windows 실행 환경 ZIP(약 440MB)을 내려받고 있습니다.'
-  try { Invoke-WebRequest -UseBasicParsing -Uri $runtimeArchiveUrl -OutFile $download -ErrorAction Stop }
+  try { Save-OtosDownload $runtimeArchiveUrl $download }
   catch { Stop-Install 'Windows 실행 환경을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
   if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -ne $runtimeArchiveSha256) {
     Stop-Install 'Windows 실행 환경 ZIP의 SHA-256 검증에 실패했습니다.'
@@ -428,11 +461,11 @@ try {
   $installStep = '구매 권한 확인'
   Write-Host '[2/4] 구매 권한을 확인하고 있습니다.'
   try {
-    $reply = Invoke-RestMethod -Method Post -Uri $RedeemUrl -ContentType 'application/json' -Body (@{
+    $reply = Request-OtosInstallAuthorization $RedeemUrl (@{
       token = $Token
       installationId = $installationId
       appVersion = 'bootstrap-windows-v1'
-    } | ConvertTo-Json -Compress)
+    } | ConvertTo-Json -Compress) $tempRoot
   } catch {
     Stop-Install '설치 서버에 연결하지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.'
   }
@@ -477,7 +510,7 @@ try {
     $source = Join-Path $tempRoot 'source'
     New-Item -ItemType Directory -Path $source | Out-Null
     Write-InstallProgress '제품 파일(약 165MB)을 내려받고 있습니다.'
-    try { Invoke-WebRequest -UseBasicParsing -Uri $reply.archiveUrl -OutFile $archive -ErrorAction Stop }
+    try { Save-OtosDownload $reply.archiveUrl $archive }
     catch { Stop-Install '제품 파일을 내려받지 못했습니다. 같은 설치 명령으로 다시 시도해주세요.' }
     Write-InstallProgress '제품 파일을 풀고 있습니다.'
     Invoke-QuietExternal 'tar.exe' @('-xzf', $archive, '-C', $source, '--strip-components=1') (Join-Path $tempRoot 'extract.log') '배포 파일을 풀지 못했습니다.'
